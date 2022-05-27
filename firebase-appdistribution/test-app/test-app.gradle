@@ -50,12 +50,10 @@ dependencies {
     // TODO(rachelprince): Add flag to build with public version of SDK
     println("Building with HEAD version ':firebase-appdistribution' of SDK")
 
-    // Debug variant uses full SDK
-    debugImplementation project(':firebase-appdistribution-api') // TODO(lkellogg): why doesn't this get picked up transitively?
+    // Include the API in all variants
+    implementation project(':firebase-appdistribution-api')
+    // Only include the full SDK implementation in the debug variant
     debugImplementation project(':firebase-appdistribution')
-
-    // Release variant just uses the API, as if publishing to Play
-    releaseImplementation project(':firebase-appdistribution-api')
 
     implementation "com.google.android.gms:play-services-tasks:18.0.1"
 

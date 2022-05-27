@@ -25,6 +25,7 @@ import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import androidx.annotation.GuardedBy;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import androidx.browser.customtabs.CustomTabsIntent;
 import com.google.android.gms.tasks.OnFailureListener;
@@ -37,6 +38,7 @@ import com.google.firebase.appdistribution.FirebaseAppDistributionException.Stat
 import com.google.firebase.inject.Provider;
 import com.google.firebase.installations.FirebaseInstallationsApi;
 import java.util.List;
+import java.util.Optional;
 
 /** Class that handles signing in the tester. */
 class TesterSignInManager {

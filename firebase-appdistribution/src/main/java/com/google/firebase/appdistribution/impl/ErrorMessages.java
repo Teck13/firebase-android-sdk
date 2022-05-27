@@ -15,10 +15,12 @@
 package com.google.firebase.appdistribution.impl;
 
 class ErrorMessages {
-  static final String NETWORK_ERROR = "Failed to fetch releases due to unknown network error.";
+  static final String NETWORK_ERROR = "Request failed with unknown network error.";
 
   static final String JSON_PARSING_ERROR =
-      "Error parsing service response when checking for new release. This was most likely due to a transient condition and may be corrected by retrying.";
+      "Error parsing service response. This was most likely due to a transient condition and may be corrected by retrying.";
+
+  static final String JSON_SERIALIZATION_ERROR = "Error building request body.";
 
   static final String AUTHENTICATION_ERROR =
       "Failed to authenticate the tester. The tester was either not signed in, or something went wrong. Try signing in again.";
@@ -28,11 +30,11 @@ class ErrorMessages {
 
   static final String AUTHENTICATION_CANCELED = "Tester canceled the authentication flow.";
 
-  static final String NOT_FOUND_ERROR =
-      "Release not found. An update was not available for the current tester and app. Make sure that FirebaseAppDistribution#checkForNewRelease returns with a non-null  AppDistributionRelease before calling FirebaseAppDistribution#updateApp";
+  static final String RELEASE_NOT_FOUND_ERROR =
+      "Release not found. An update was not available for the current tester and app. Make sure that FirebaseAppDistribution#checkForNewRelease returns with a non-null AppDistributionRelease before calling FirebaseAppDistribution#updateApp";
 
   static final String TIMEOUT_ERROR =
-      "Failed to fetch releases due to timeout. Check the tester's internet connection and try again.";
+      "Request timed out. Check the tester's internet connection and try again.";
 
   static final String UPDATE_CANCELED = "Tester canceled the update.";
 
@@ -42,7 +44,7 @@ class ErrorMessages {
       "Download URL not found. This was a most likely due to a transient condition and may be corrected by retrying.";
 
   static final String HOST_ACTIVITY_INTERRUPTED =
-      "Host activity interrupted while dialog was showing. Try calling FirebaseAppDistribution#updateIfNewReleaseAvailable again.";
+      "Host activity interrupted while dialog was showing. Try calling the API again.";
 
   static final String APK_INSTALLATION_FAILED =
       "The APK failed to install or installation was canceled by the tester.";

@@ -14,6 +14,8 @@
 
 package com.google.firebase.appdistribution.impl;
 
+import static com.google.firebase.appdistribution.impl.TaskUtils.runAsyncInTask;
+
 import android.content.Context;
 import android.content.pm.PackageManager;
 import androidx.annotation.NonNull;
@@ -21,23 +23,47 @@ import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import com.google.android.gms.common.util.AndroidUtilsLight;
 import com.google.android.gms.common.util.Hex;
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.Tasks;
+import com.google.auto.value.AutoValue;
+import com.google.firebase.FirebaseApp;
 import com.google.firebase.appdistribution.BinaryType;
 import com.google.firebase.appdistribution.FirebaseAppDistributionException;
 import com.google.firebase.appdistribution.FirebaseAppDistributionException.Status;
+import com.google.firebase.inject.Provider;
+import com.google.firebase.installations.FirebaseInstallationsApi;
+import com.google.firebase.installations.InstallationTokenResult;
+import com.google.gson.JsonObject;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.zip.GZIPOutputStream;
 import javax.net.ssl.HttpsURLConnection;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-class FirebaseAppDistributionTesterApiClient {
+public class FirebaseAppDistributionTesterApiClient {
 
-  private static final String RELEASE_ENDPOINT_URL_FORMAT =
-      "https://firebaseapptesters.googleapis.com/v1alpha/devices/-/testerApps/%s/installations/%s/releases";
+  @AutoValue
+  abstract static class FidAndToken {
+    abstract String fid();
+    abstract String token();
+  }
+
+  private static final String APP_TESTERS_HOST = "firebaseapptesters.googleapis.com";
+  private static final String FEEDBACK_ENDPOINT_PATH_FORMAT = "/v1alpha/projects/%s/installations/%s/releases/%s/feedback";
+  private static final String RELEASE_ENDPOINT_PATH_FORMAT = "/v1alpha/projects/%s/installations/%s/releases";
+  private static final String LEGACY_RELEASE_ENDPOINT_PATH_FORMAT = "/v1alpha/devices/-/testerApps/%s/installations/%s/releases";
   private static final String REQUEST_METHOD_GET = "GET";
+  private static final String REQUEST_METHOD_POST = "POST";
+  private static final String CONTENT_TYPE_HEADER_KEY = "Content-Type";
+  private static final String JSON_CONTENT_TYPE = "application/json";
+  private static final String CONTENT_ENCODING_HEADER_KEY = "Content-Encoding";
+  private static final String GZIP_CONTENT_ENCODING = "gzip";
   private static final String API_KEY_HEADER = "x-goog-api-key";
   private static final String INSTALLATION_AUTH_HEADER = "X-Goog-Firebase-Installations-Auth";
   private static final String X_ANDROID_PACKAGE_HEADER_KEY = "X-Android-Package";
@@ -58,35 +84,142 @@ class FirebaseAppDistributionTesterApiClient {
 
   public static final int DEFAULT_BUFFER_SIZE = 8192;
 
+  private final FirebaseApp firebaseApp;
+  private final Provider<FirebaseInstallationsApi> firebaseInstallationsApiProvider;
   private final HttpsUrlConnectionFactory httpsUrlConnectionFactory;
+  private final Executor taskExecutor;
 
-  FirebaseAppDistributionTesterApiClient() {
-    this(new HttpsUrlConnectionFactory());
+  FirebaseAppDistributionTesterApiClient(@NonNull FirebaseApp firebaseApp, @NonNull Provider<FirebaseInstallationsApi> firebaseInstallationsApiProvider) {
+    this(Executors.newSingleThreadExecutor(), firebaseApp, firebaseInstallationsApiProvider, new HttpsUrlConnectionFactory());
   }
 
   @VisibleForTesting
   FirebaseAppDistributionTesterApiClient(
+      @NonNull Executor taskExecutor,
+      @NonNull FirebaseApp firebaseApp,
+      @NonNull Provider<FirebaseInstallationsApi> firebaseInstallationsApiProvider,
       @NonNull HttpsUrlConnectionFactory httpsUrlConnectionFactory) {
+    this.taskExecutor = taskExecutor;
+    this.firebaseApp = firebaseApp;
+    this.firebaseInstallationsApiProvider = firebaseInstallationsApiProvider;
     this.httpsUrlConnectionFactory = httpsUrlConnectionFactory;
   }
 
   /**
-   * Fetches and returns the latest release for the app that the tester has access to, or null if
-   * the tester doesn't have access to any releases.
+   * Fetches and returns a {@link Task} that will complete with the latest release for the app that
+   * the tester has access to, or {@code null} if the tester doesn't have access to any releases.
    */
+  @NonNull
+  Task<AppDistributionReleaseInternal> fetchNewRelease() {
+    return getFidAndToken()
+        .onSuccessTask(
+            fidAndToken ->
+                runAsyncInTask(
+                    taskExecutor, () -> fetchNewRelease(
+                        fidAndToken.fid(),
+                        firebaseApp.getOptions().getApplicationId(),
+                        firebaseApp.getOptions().getApiKey(),
+                        fidAndToken.token(),
+                        firebaseApp.getApplicationContext())));
+  }
+
   @Nullable
-  AppDistributionReleaseInternal fetchNewRelease(
+  private AppDistributionReleaseInternal fetchNewRelease(
       @NonNull String fid,
       @NonNull String appId,
       @NonNull String apiKey,
       @NonNull String authToken,
       @NonNull Context context)
       throws FirebaseAppDistributionException {
-    HttpsURLConnection connection = null;
+    String path = String.format(LEGACY_RELEASE_ENDPOINT_PATH_FORMAT, appId, fid);
+    String responseBody = makeGetRequest(path, apiKey, authToken, context);
+    return parseNewRelease(responseBody);
+  }
+
+  /**
+   * Fetches and returns the name of the installed release, or null if it could not be found.
+   */
+  @NonNull
+  public Task<String> findRelease() {
+    return getFidAndToken()
+        .onSuccessTask(
+            fidAndToken ->
+                runAsyncInTask(
+                    taskExecutor, () -> findRelease(
+                        fidAndToken.fid(),
+                        firebaseApp.getOptions().getGcmSenderId(), // Project number
+                        firebaseApp.getOptions().getApiKey(),
+                        fidAndToken.token(),
+                        firebaseApp.getApplicationContext())));
+  }
+
+  private String findRelease(String fid, String projectNumber, String apiKey, String token, Context context)
+      throws FirebaseAppDistributionException {
+    String path = String.format(RELEASE_ENDPOINT_PATH_FORMAT, projectNumber, fid) + ":find";
+    String responseBody = makeGetRequest(path, apiKey, token, context);
+    return parseFindReleaseResponse(responseBody);
+  }
+
+  /** Creates a new feedback from the given text, and returns the feedback name. */
+  @NonNull
+  public Task<String> createFeedback(String testerReleaseName, String feedbackText) {
+    return getFidAndToken()
+        .onSuccessTask(
+            fidAndToken ->
+                runAsyncInTask(
+                    taskExecutor, () -> createFeedback(
+                        testerReleaseName,
+                        firebaseApp.getOptions().getApiKey(),
+                        fidAndToken.token(),
+                        firebaseApp.getApplicationContext(),
+                        feedbackText)));
+  }
+
+  private String createFeedback(String testerReleaseName, String apiKey, String token, Context context, String feedbackText)
+      throws FirebaseAppDistributionException {
+    String path = String.format("%s/feedback", testerReleaseName);
+    String requestBody = buildCreateFeedbackBody(feedbackText).toString();
+    String responseBody = makePostRequest(path, apiKey, token, context, requestBody);
+    return parseFindReleaseResponse(responseBody);
+  }
+
+  /** Commits the feedback with the given name. */
+  @NonNull
+  public Task<String> commitFeedback(String feedbackName) {
+    return getFidAndToken()
+        .onSuccessTask(
+            fidAndToken ->
+                runAsyncInTask(
+                    taskExecutor, () -> commitFeedback(
+                        firebaseApp.getOptions().getApiKey(),
+                        fidAndToken.token(),
+                        firebaseApp.getApplicationContext(),
+                        feedbackName)));
+  }
+
+  private String commitFeedback(String apiKey, String token, Context context, String feedbackName)
+      throws FirebaseAppDistributionException {
+    String path = "/" + feedbackName;
+    String responseBody = makePostRequest(path, apiKey, token, context, /* requestBody= */ "");
+    return parseFindReleaseResponse(responseBody);
+  }
+
+  private static JSONObject buildCreateFeedbackBody(String feedbackText)
+      throws FirebaseAppDistributionException {
+    JSONObject feedbackJsonObject = new JSONObject();
+    try {
+      feedbackJsonObject.put("text", feedbackText);
+    } catch (JSONException e) {
+      throw new FirebaseAppDistributionException(ErrorMessages.JSON_SERIALIZATION_ERROR, Status.UNKNOWN, e);
+    }
+    return feedbackJsonObject;
+  }
+
+  private String readResponse(HttpsURLConnection connection)
+      throws FirebaseAppDistributionException {
     int responseCode;
     String responseBody;
     try {
-      connection = openHttpsUrlConnection(appId, fid, apiKey, authToken, context);
       responseCode = connection.getResponseCode();
       responseBody = readResponseBody(connection);
     } catch (IOException e) {
@@ -102,7 +235,58 @@ class FirebaseAppDistributionTesterApiClient {
       throw getExceptionForHttpResponse(responseCode);
     }
 
-    return parseNewRelease(responseBody);
+    return responseBody;
+  }
+
+  private String makePostRequest(String path, String apiKey, String token, Context context, String requestBody)
+      throws FirebaseAppDistributionException {
+    String url = String.format("https://%s/%s", APP_TESTERS_HOST, path);
+    HttpsURLConnection connection;
+    try {
+      connection = openHttpsUrlConnection(url, apiKey, token, context);
+      connection.setDoOutput(true);
+      connection.setRequestMethod(REQUEST_METHOD_POST);
+      connection.addRequestProperty(CONTENT_TYPE_HEADER_KEY, JSON_CONTENT_TYPE);
+      connection.addRequestProperty(CONTENT_ENCODING_HEADER_KEY, GZIP_CONTENT_ENCODING);
+      connection.getOutputStream();
+      GZIPOutputStream gzipOutputStream =
+          new GZIPOutputStream(connection.getOutputStream());
+      try {
+        gzipOutputStream.write(requestBody.getBytes("UTF-8"));
+      } catch (IOException e) {
+        throw new FirebaseAppDistributionException("Error compressing network request body", Status.UNKNOWN, e);
+      } finally {
+        gzipOutputStream.close();
+      }
+    } catch (IOException e) {
+      throw new FirebaseAppDistributionException(
+          ErrorMessages.NETWORK_ERROR, Status.NETWORK_FAILURE, e);
+    }
+    return readResponse(connection);
+  }
+
+  private String makeGetRequest(String path, String apiKey, String token, Context context)
+      throws FirebaseAppDistributionException {
+    String url = String.format("https://%s/%s", APP_TESTERS_HOST, path);
+    HttpsURLConnection connection;
+    try {
+      connection = openHttpsUrlConnection(url, apiKey, token, context);
+    } catch (IOException e) {
+      throw new FirebaseAppDistributionException(
+          ErrorMessages.NETWORK_ERROR, Status.NETWORK_FAILURE, e);
+    }
+    return readResponse(connection);
+  }
+
+  private Task<FidAndToken> getFidAndToken() {
+    Task<String> installationIdTask = firebaseInstallationsApiProvider.get().getId();
+    // forceRefresh is false to get locally cached token if available
+    Task<InstallationTokenResult> installationAuthTokenTask =
+        firebaseInstallationsApiProvider.get().getToken(false);
+
+    return Tasks.whenAllSuccess(installationIdTask, installationAuthTokenTask)
+        .continueWithTask(TaskUtils::handleTaskFailure)
+        .onSuccessTask(list -> Tasks.forResult(new AutoValue_FirebaseAppDistributionTesterApiClient_FidAndToken((String) list.get(0), ((InstallationTokenResult) list.get(1)).getToken())));
   }
 
   private String readResponseBody(HttpsURLConnection connection) throws IOException {
@@ -168,11 +352,29 @@ class FirebaseAppDistributionTesterApiClient {
     }
   }
 
+  private String parseFindReleaseResponse(String responseBody)
+      throws FirebaseAppDistributionException {
+    JSONObject responseJson;
+    try {
+      responseJson = new JSONObject(responseBody);
+    } catch (JSONException e) {
+      LogWrapper.getInstance().e(TAG + "Error parsing the response.", e);
+      throw new FirebaseAppDistributionException(
+          ErrorMessages.JSON_PARSING_ERROR, Status.UNKNOWN, e);
+    }
+
+    try {
+      return responseJson.getString("release");
+    } catch (JSONException e) {
+      return null;
+    }
+  }
+
   private FirebaseAppDistributionException getExceptionForHttpResponse(int responseCode) {
     switch (responseCode) {
       case 400:
         return new FirebaseAppDistributionException(
-            "Bad request when fetching new release", Status.UNKNOWN);
+            "Bad request", Status.UNKNOWN);
       case 401:
         return new FirebaseAppDistributionException(
             ErrorMessages.AUTHENTICATION_ERROR, Status.AUTHENTICATION_FAILURE);
@@ -181,14 +383,14 @@ class FirebaseAppDistributionTesterApiClient {
             ErrorMessages.AUTHORIZATION_ERROR, Status.AUTHENTICATION_FAILURE);
       case 404:
         return new FirebaseAppDistributionException(
-            "App or tester not found when fetching new release", Status.AUTHENTICATION_FAILURE);
+            "App or tester not found", Status.AUTHENTICATION_FAILURE);
       case 408:
       case 504:
         return new FirebaseAppDistributionException(
             ErrorMessages.TIMEOUT_ERROR, Status.NETWORK_FAILURE);
       default:
         return new FirebaseAppDistributionException(
-            "Received error status when fetching new release: " + responseCode, Status.UNKNOWN);
+            "Received error status: " + responseCode, Status.UNKNOWN);
     }
   }
 
@@ -201,10 +403,9 @@ class FirebaseAppDistributionTesterApiClient {
   }
 
   private HttpsURLConnection openHttpsUrlConnection(
-      String appId, String fid, String apiKey, String authToken, Context context)
+      String url, String apiKey, String authToken, Context context)
       throws IOException {
     HttpsURLConnection httpsURLConnection;
-    String url = String.format(RELEASE_ENDPOINT_URL_FORMAT, appId, fid);
     httpsURLConnection = httpsUrlConnectionFactory.openConnection(url);
     httpsURLConnection.setRequestMethod(REQUEST_METHOD_GET);
     httpsURLConnection.setRequestProperty(API_KEY_HEADER, apiKey);

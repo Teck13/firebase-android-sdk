@@ -18,13 +18,13 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 
 /** Wrapper that handles Android logcat logging. */
-class LogWrapper {
+public class LogWrapper {
 
   private static final String LOG_TAG = "FirebaseAppDistribution";
   private static LogWrapper instance;
 
   @NonNull
-  static synchronized LogWrapper getInstance() {
+  public static synchronized LogWrapper getInstance() {
     if (instance == null) {
       instance = new LogWrapper();
     }
@@ -32,31 +32,31 @@ class LogWrapper {
     return instance;
   }
 
-  void d(@NonNull String msg) {
+  public void d(@NonNull String msg) {
     Log.d(LOG_TAG, msg);
   }
 
-  void v(@NonNull String msg) {
+  public void v(@NonNull String msg) {
     Log.v(LOG_TAG, msg);
   }
 
-  void i(@NonNull String msg) {
+  public void i(@NonNull String msg) {
     Log.i(LOG_TAG, msg);
   }
 
-  void w(@NonNull String msg) {
+  public void w(@NonNull String msg) {
     Log.w(LOG_TAG, msg);
   }
 
-  void w(@NonNull String msg, @NonNull Throwable tr) {
+  public void w(@NonNull String msg, @NonNull Throwable tr) {
     Log.w(LOG_TAG, msg, tr);
   }
 
-  void e(@NonNull String msg) {
+  public void e(@NonNull String msg) {
     Log.e(LOG_TAG, msg);
   }
 
-  void e(@NonNull String msg, @NonNull Throwable tr) {
+  public void e(@NonNull String msg, @NonNull Throwable tr) {
     Log.e(LOG_TAG, msg, tr);
   }
 

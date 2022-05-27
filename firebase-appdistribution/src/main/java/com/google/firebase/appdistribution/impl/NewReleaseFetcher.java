@@ -83,64 +83,41 @@ class NewReleaseFetcher {
 
   @NonNull
   public synchronized Task<AppDistributionReleaseInternal> checkForNewRelease() {
-
-    if (cachedCheckForNewRelease != null && !cachedCheckForNewRelease.isComplete()) {
+    if (cachedCheckForNewRelease == null || cachedCheckForNewRelease.isComplete()) {
       return cachedCheckForNewRelease;
     }
 
-    Task<String> installationIdTask = firebaseInstallationsApiProvider.get().getId();
-    // forceRefresh is false to get locally cached token if available
-    Task<InstallationTokenResult> installationAuthTokenTask =
-        firebaseInstallationsApiProvider.get().getToken(false);
-
     this.cachedCheckForNewRelease =
-        Tasks.whenAllSuccess(installationIdTask, installationAuthTokenTask)
-            .continueWithTask(TaskUtils::handleTaskFailure)
-            .onSuccessTask(
-                unused ->
-                    getNewReleaseFromClientTask(
-                        installationIdTask.getResult(),
-                        firebaseApp.getOptions().getApplicationId(),
-                        firebaseApp.getOptions().getApiKey(),
-                        installationAuthTokenTask.getResult().getToken()));
+        firebaseAppDistributionTesterApiClient.fetchNewRelease()
+            .onSuccessTask(release -> Tasks.forResult(isNewerRelease(release) ? release : null));
 
     return cachedCheckForNewRelease;
   }
 
-  private Task<AppDistributionReleaseInternal> getNewReleaseFromClientTask(
-      String fid, String appId, String apiKey, String authToken) {
-    return runAsyncInTask(
-        taskExecutor, () -> getNewReleaseFromClient(fid, appId, apiKey, authToken));
-  }
-
   @Nullable
   @VisibleForTesting
-  AppDistributionReleaseInternal getNewReleaseFromClient(
-      String fid, String appId, String apiKey, String authToken)
+  boolean isNewerRelease(
+      AppDistributionReleaseInternal retrievedNewRelease)
       throws FirebaseAppDistributionException {
-    AppDistributionReleaseInternal retrievedNewRelease =
-        firebaseAppDistributionTesterApiClient.fetchNewRelease(
-            fid, appId, apiKey, authToken, firebaseApp.getApplicationContext());
-
     if (retrievedNewRelease == null) {
       LogWrapper.getInstance().v(TAG + "Tester does not have access to any releases");
-      return null;
+      return false;
     }
 
     long newReleaseBuildVersion = parseBuildVersion(retrievedNewRelease.getBuildVersion());
 
     if (isOlderBuildVersion(newReleaseBuildVersion)) {
       LogWrapper.getInstance().v(TAG + "New release has lower version code than current release");
-      return null;
+      return false;
     }
 
     if (isNewerBuildVersion(newReleaseBuildVersion)
         || !isSameAsInstalledRelease(retrievedNewRelease)
         || hasDifferentAppVersionName(retrievedNewRelease)) {
-      return retrievedNewRelease;
+      return true;
     } else {
       LogWrapper.getInstance().v(TAG + "New release is older or is currently installed");
-      return null;
+      return false;
     }
   }
 
@@ -207,6 +184,18 @@ class NewReleaseFetcher {
   }
 
   @VisibleForTesting
+  String extractApkHash() throws FirebaseAppDistributionException {
+    Context context = firebaseApp.getApplicationContext();
+    PackageInfo metadataPackageInfo = getPackageInfoWithMetadata(context);
+    String installedReleaseApkHash = extractApkHash(metadataPackageInfo);
+    if (installedReleaseApkHash == null || installedReleaseApkHash.isEmpty()) {
+      throw new FirebaseAppDistributionException(
+          "Could not calculate hash of installed APK", Status.UNKNOWN);
+    }
+    return installedReleaseApkHash;
+  }
+
+  @VisibleForTesting
   String extractApkHash(PackageInfo packageInfo) {
     File sourceFile = new File(packageInfo.applicationInfo.sourceDir);
 
@@ -221,14 +210,8 @@ class NewReleaseFetcher {
 
   private boolean hasSameHashAsInstalledRelease(AppDistributionReleaseInternal newRelease)
       throws FirebaseAppDistributionException {
-    Context context = firebaseApp.getApplicationContext();
-    PackageInfo metadataPackageInfo = getPackageInfoWithMetadata(context);
-    String installedReleaseApkHash = extractApkHash(metadataPackageInfo);
-
-    if (installedReleaseApkHash == null || installedReleaseApkHash.isEmpty()) {
-      throw new FirebaseAppDistributionException(
-          "Could not calculate hash of installed APK", Status.UNKNOWN);
-    } else if (newRelease.getApkHash().isEmpty()) {
+    String installedReleaseApkHash = extractApkHash();
+    if (newRelease.getApkHash().isEmpty()) {
       throw new FirebaseAppDistributionException(
           "Missing APK hash from new release", Status.UNKNOWN);
     }
